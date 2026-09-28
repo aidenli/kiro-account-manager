@@ -45,12 +45,21 @@ fn build_kiro_management_service_url(region: &str) -> String {
     format!("https://{}", build_kiro_management_host(region))
 }
 
-fn build_get_usage_limits_url(region: &str) -> String {
+fn build_get_usage_limits_url(region: &str, profile_arn: Option<&str>) -> String {
     let base = build_kiro_management_service_url(region);
-    // getUsageLimits 不携带 profileArn：企业账号带了会 400（对齐 kiro.rs v0.6.11）
-    format!(
+    // profileArn 必须带上：social(Github) 账号不带会被 Kiro 判
+    // 400 `{"message":"Invalid profileArn."}`。企业账号 resolve 后 profile_arn 恒为
+    // None（见 resolve_profile_arn_with_fallback），因此带上不会触发企业号的 400。
+    let mut url = format!(
         "{base}/getUsageLimits?isEmailRequired=true&origin=AI_EDITOR&resourceType=AGENTIC_REQUEST"
-    )
+    );
+    if let Some(arn) = profile_arn.map(str::trim).filter(|s| !s.is_empty()) {
+        // ARN 含 ':' 与 '/'，必须百分号编码
+        let encoded = url::form_urlencoded::byte_serialize(arn.as_bytes()).collect::<String>();
+        url.push_str("&profileArn=");
+        url.push_str(&encoded);
+    }
+    url
 }
 
 /// 构造 getUsageLimits 的 region 尝试顺序：优先账号 region，企业号再回退常见 region。
@@ -168,14 +177,15 @@ impl KiroClient {
         Self { client }
     }
 
-    /// 统一的 getUsageLimits 接口（支持所有账号类型；URL 不带 profileArn）
+    /// 统一的 getUsageLimits 接口（支持所有账号类型；social 账号必须带 profileArn）
     pub async fn get_usage_limits(
         &self,
         access_token: &str,
         machine_id: &str,
         region: &str,
+        profile_arn: Option<&str>,
     ) -> Result<serde_json::Value, String> {
-        let url = build_get_usage_limits_url(region);
+        let url = build_get_usage_limits_url(region, profile_arn);
 
         log::info!("[GetUsageLimits] Request - region: {region}");
 
@@ -209,11 +219,12 @@ impl KiroClient {
         access_token: &str,
         machine_id: &str,
         regions: &[String],
+        profile_arn: Option<&str>,
     ) -> Result<(String, serde_json::Value), String> {
         let mut last_err = String::new();
         for region in regions {
             match self
-                .get_usage_limits(access_token, machine_id, region)
+                .get_usage_limits(access_token, machine_id, region, profile_arn)
                 .await
             {
                 Ok(v) => return Ok((region.clone(), v)),
@@ -395,7 +406,26 @@ mod tests {
     #[test]
     fn builds_get_usage_limits_url_without_profile_arn() {
         assert_eq!(
-            build_get_usage_limits_url("us-east-1"),
+            build_get_usage_limits_url("us-east-1", None),
+            "https://management.us-east-1.kiro.dev/getUsageLimits?isEmailRequired=true&origin=AI_EDITOR&resourceType=AGENTIC_REQUEST"
+        );
+    }
+
+    #[test]
+    fn builds_get_usage_limits_url_with_percent_encoded_profile_arn() {
+        assert_eq!(
+            build_get_usage_limits_url(
+                "us-east-1",
+                Some("arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK"),
+            ),
+            "https://management.us-east-1.kiro.dev/getUsageLimits?isEmailRequired=true&origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&profileArn=arn%3Aaws%3Acodewhisperer%3Aus-east-1%3A699475941385%3Aprofile%2FEHGA3GRVQMUK"
+        );
+    }
+
+    #[test]
+    fn builds_get_usage_limits_url_ignores_blank_profile_arn() {
+        assert_eq!(
+            build_get_usage_limits_url("us-east-1", Some("   ")),
             "https://management.us-east-1.kiro.dev/getUsageLimits?isEmailRequired=true&origin=AI_EDITOR&resourceType=AGENTIC_REQUEST"
         );
     }

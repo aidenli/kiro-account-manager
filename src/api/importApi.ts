@@ -12,6 +12,9 @@ export function addAccountBySocial(args: {
   provider: string
   machineId?: string | null
   accessToken?: string | null
+  // social(Github) 账号取配额必须带 profileArn，否则 Kiro 判 400 "Invalid profileArn"，
+  // 会导致取不到 email / 档位（账号名退化成 builderid_xxxx、Pro 显示成 Free）
+  profileArn?: string | null
 }) {
   return invoke('add_account_by_social', args)
 }

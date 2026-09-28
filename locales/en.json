@@ -1444,6 +1444,8 @@
   "gateway.securityAndAdvanced": "Security & Advanced",
   "gateway.cacheTTLSeconds": "Cache TTL (seconds)",
   "gateway.thresholdPercent": "Threshold %",
+  "gateway.webSearchEmulation": "Server-side web_search emulation",
+  "gateway.webSearchTimeout": "Search timeout (seconds)",
   "gateway.ipWhitelist": "IP Whitelist",
   "gateway.manageKeys": "Manage Keys",
   "gateway.keys": "Keys",

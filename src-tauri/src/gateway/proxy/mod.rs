@@ -76,6 +76,7 @@ mod responses;
 mod errors;
 mod upstream;
 mod streaming;
+mod web_search;
 
 pub use auth::*;
 pub use tokens::*;
@@ -86,6 +87,7 @@ pub use responses::*;
 pub use errors::*;
 pub use upstream::*;
 pub use streaming::*;
+pub use web_search::*;
 
 #[cfg(test)]
 mod tests;

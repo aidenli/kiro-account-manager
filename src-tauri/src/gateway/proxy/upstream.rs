@@ -136,6 +136,26 @@ pub async fn proxy_handler(
         }
     };
 
+    // 服务端 web_search 模拟（Path A，开关控制，默认关闭）。
+    //
+    // Claude Code 的 WebSearch 会单独发一条「纯服务端搜索请求」
+    // （tools 全部是 web_search_20250305 + tool_choice 指向 web_search）。
+    // Kiro 上游没有服务端搜索能力，这类请求此前要么被拒、要么返回空结果，
+    // 这里改由网关直接调 Kiro MCP 完成搜索，并按 Anthropic 服务端工具格式回吐。
+    if matches!(format, ResponseFormat::Anthropic) && state.config.web_search_emulation {
+        if let Some(query) = detect_pure_web_search(&payload) {
+            log::info!("[网关] 命中服务端 web_search 模拟: {query}");
+            return handle_emulated_web_search(
+                &state,
+                request.stream,
+                &request.model,
+                &query,
+                preferred_account_id.as_deref(),
+            )
+            .await;
+        }
+    }
+
     // 模型映射：根据规则替换请求的模型名（仅 OpenAI 协议）
     let original_model = request.model.clone();
     if matches!(format, ResponseFormat::OpenAI | ResponseFormat::Responses) {
@@ -513,6 +533,16 @@ pub async fn proxy_handler(
     let mut last_retriable_error: Option<(StatusCode, String, String, Option<String>)> = None;
     let mut consecutive_auth_failures = 0;
     const MAX_AUTH_FAILURES: u32 = 5; // 连续认证失败次数上限
+    /// 429/402/401 这类「可重试错误」的最大重试轮数。
+    ///
+    /// 旧实现对该类错误**无限重试**，且每轮等待 `5 × 轮数` 秒（5/10/15/… 无上限）：
+    /// 单账号场景下一次 429 就能把请求拖住好几分钟（实测到「第 9 轮等 40 秒」仍在继续），
+    /// 客户端表现为长时间无响应。现在封顶后直接返回上游错误，行为可预测。
+    const MAX_RETRIABLE_ROUNDS: u32 = 2;
+    /// 单轮最大等待秒数（快速失败优先）
+    const MAX_RETRIABLE_WAIT_SECS: u64 = 4;
+    /// 每轮的等待步长
+    const RETRIABLE_WAIT_STEP_SECS: u64 = 2;
 
     // 获取可用账号数量，用于判断何时需要等待
     // 指定了 x-account-id 时固定为 1，避免失败后自动换到其他账号
@@ -571,15 +601,43 @@ pub async fn proxy_handler(
             retry_round += 1;
             account_attempt = 1; // 重置计数器，开始新一轮
 
-            // 如果有可重试错误（429/402/401），等待后重试
-            if let Some((status, _, _, _)) = &last_retriable_error {
-                if *status == StatusCode::TOO_MANY_REQUESTS || *status == StatusCode::PAYMENT_REQUIRED || *status == StatusCode::UNAUTHORIZED {
-                    let wait_seconds = 5u64 * retry_round as u64; // 每轮等待时间递增
+            // 如果有可重试错误（429/402/401），等待后重试；轮数与等待时长均封顶
+            let retriable_status = last_retriable_error.as_ref().map(|(s, _, _, _)| *s);
+            if let Some(status) = retriable_status {
+                if status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::PAYMENT_REQUIRED || status == StatusCode::UNAUTHORIZED {
+                    if retry_round > MAX_RETRIABLE_ROUNDS {
+                        // 已达重试上限：不再无限等待，直接把上游错误返回给客户端
+                        log::warn!(
+                            "[Gateway] 全部账号持续返回 {}，已重试 {} 轮达上限，放弃重试并返回错误",
+                            status.as_u16(),
+                            MAX_RETRIABLE_ROUNDS
+                        );
+                        if let Some((status, error_type, message, response_body)) =
+                            last_retriable_error
+                        {
+                            return gateway_error_with_log(
+                                &state,
+                                format,
+                                &upstream_payload_log_context,
+                                GatewayErrorDetails {
+                                    status,
+                                    error_type: &error_type,
+                                    message: &message,
+                                    response_body: response_body.as_deref(),
+                                },
+                            )
+                            .await;
+                        }
+                    }
+
+                    let wait_seconds = (RETRIABLE_WAIT_STEP_SECS * retry_round as u64)
+                        .min(MAX_RETRIABLE_WAIT_SECS);
                     log::warn!(
-                        "[Gateway] 所有账号都返回 {} 错误，等{} 秒后重试 (第{} 轮)",
+                        "[Gateway] 所有账号都返回 {} 错误，等{} 秒后重试 (第{} 轮，上限{} 轮)",
                         status.as_u16(),
                         wait_seconds,
-                        retry_round + 1
+                        retry_round,
+                        MAX_RETRIABLE_ROUNDS
                     );
                     tokio::time::sleep(tokio::time::Duration::from_secs(wait_seconds)).await;
 

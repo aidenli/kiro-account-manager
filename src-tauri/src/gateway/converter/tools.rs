@@ -72,6 +72,20 @@ pub fn shorten_tool_name(name: &str) -> String {
     name.chars().take(64).collect()
 }
 
+/// Anthropic 服务端工具（请求里只有 `type` + `name`，没有 description / input_schema）
+/// 由 Anthropic 服务端执行；Kiro 没有对应能力，网关只能降级成普通 function 工具转发。
+/// 由于 Kiro 拒绝空 description（见 `tool_description`），这里按 type 补一个准确描述。
+fn server_side_tool_description(tool_type: &str) -> Option<&'static str> {
+    let tool_type = tool_type.trim().to_ascii_lowercase();
+    if tool_type.starts_with("web_search") {
+        Some("Search the web for current information; put the search query in `query`.")
+    } else if tool_type.starts_with("web_fetch") {
+        Some("Fetch the contents of a URL; put the URL in `url`.")
+    } else {
+        None
+    }
+}
+
 /// 转换 Anthropic 工具定义，返回 (Tool, Option<(sanitized_name, original_name)>)
 pub fn convert_anthropic_tool(
     tool: &crate::gateway::models::AnthropicTool,
@@ -79,18 +93,28 @@ pub fn convert_anthropic_tool(
     let sanitized = shorten_tool_name(&sanitize_tool_name(&tool.name));
 
     // 截断超长描述（和 Kiro-Go 保持一致）
-    let description = tool.description.as_ref().map(|desc| {
-        if desc.len() > TOOL_DESCRIPTION_MAX_LENGTH {
-            // 按字节上限截断，但回退到最近的字符边界，避免在多字节字符（中文/emoji）中间切断导致 panic
-            let mut end = TOOL_DESCRIPTION_MAX_LENGTH;
-            while end > 0 && !desc.is_char_boundary(end) {
-                end -= 1;
+    let description = tool
+        .description
+        .as_ref()
+        .map(|desc| {
+            if desc.len() > TOOL_DESCRIPTION_MAX_LENGTH {
+                // 按字节上限截断，但回退到最近的字符边界，避免在多字节字符（中文/emoji）中间切断导致 panic
+                let mut end = TOOL_DESCRIPTION_MAX_LENGTH;
+                while end > 0 && !desc.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...", &desc[..end])
+            } else {
+                desc.clone()
             }
-            format!("{}...", &desc[..end])
-        } else {
-            desc.clone()
-        }
-    });
+        })
+        // 服务端工具没有 description，按 type 补一个可读描述
+        .or_else(|| {
+            tool.r#type
+                .as_deref()
+                .and_then(server_side_tool_description)
+                .map(str::to_string)
+        });
 
     let converted_tool = Tool {
         tool_type: "function".to_string(),
@@ -177,9 +201,20 @@ pub fn normalize_tool_choice(
                         .to_string()
                 })?;
 
+            // 工具名在转换时会被 sanitize 成 camelCase 并截断到 64 字符
+            // （web_search -> webSearch，见 convert_anthropic_tool 及 openai_chat/responses 的
+            // 同名处理），而 tool_choice 里带的是客户端原始名。必须做同样的归一化再比对，
+            // 否则合法请求会被误判为「工具不存在」——例如 Anthropic 服务端工具
+            // {type:"web_search_20250305", name:"web_search"} 配 tool_choice.name="web_search"。
+            let normalized = shorten_tool_name(&sanitize_tool_name(name));
+
             let tool_exists = tools
                 .as_ref()
-                .map(|items| items.iter().any(|tool| tool.function.name == name))
+                .map(|items| {
+                    items
+                        .iter()
+                        .any(|tool| tool.function.name == name || tool.function.name == normalized)
+                })
                 .unwrap_or(false);
             if !tool_exists {
                 return Err(format!("tool_choice 指定的工具不存在: {name}"));
@@ -187,7 +222,8 @@ pub fn normalize_tool_choice(
 
             Ok(Some(json!({
                 "type": "function",
-                "name": name
+                // 返回上游实际使用的（已归一化的）工具名
+                "name": normalized
             })))
         }
         other => Err(format!(
@@ -221,8 +257,28 @@ pub fn convert_tools(tools: &Option<Vec<Tool>>) -> Option<Vec<KiroTool>> {
     })
 }
 
+/// 取工具的 Kiro 描述。
+///
+/// Kiro 会拒绝 `toolSpecification.description` 为空串的工具，实测返回
+/// 400 `{"message":"Invalid tool use format.","reason":"REQUEST_BODY_INVALID"}`。
+/// 已用四个变体隔离确认：**空 description 是唯一触发条件**，
+/// inputSchema 缺少 properties 并不影响（`{"json":{"type":"object"}}` 可以通过）。
+///
+/// Anthropic 的服务端工具（web_search / web_fetch 等）在请求里本来就没有 description，
+/// 所以这里必须兜底成非空文本。
 pub fn tool_description(tool: &Tool) -> String {
-    tool.function.description.clone().unwrap_or_default()
+    let description = tool
+        .function
+        .description
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+
+    if description.is_empty() {
+        format!("The {} tool.", tool.function.name)
+    } else {
+        description.to_string()
+    }
 }
 
 pub fn tool_input_schema(tool: &Tool) -> Value {

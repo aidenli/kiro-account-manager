@@ -1400,6 +1400,8 @@
   "gateway.securityAndAdvanced": "安全与高级",
   "gateway.cacheTTLSeconds": "缓存TTL(秒)",
   "gateway.thresholdPercent": "阈值%",
+  "gateway.webSearchEmulation": "服务端 web_search 模拟",
+  "gateway.webSearchTimeout": "搜索超时(秒)",
   "gateway.ipWhitelist": "IP 白名单",
   "gateway.manageKeys": "管理 Keys",
   "gateway.keys": "个 Key",

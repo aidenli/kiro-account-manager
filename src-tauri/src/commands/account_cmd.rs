@@ -12,7 +12,8 @@ use crate::commands::account_models::{
 use crate::commands::common::{
     account_machine_id_or_new, calc_expires_at, ensure_account_machine_id, extract_user_info,
     find_account_by_id, find_existing_account_idx, generate_account_machine_id,
-    get_usage_by_account, get_usage_by_provider_with_machine_id, is_auth_error_message,
+    get_usage_by_account, get_usage_by_provider_with_machine_id,
+    get_usage_by_provider_with_machine_id_and_arn, is_auth_error_message,
     is_token_expired, is_token_expiring_soon, lock_store, normalize_expires_at,
     refresh_token_by_provider, save_store, token_needs_refresh, update_account_status,
     RefreshResult,
@@ -563,57 +564,94 @@ pub async fn add_account_by_social(
     provider: Option<String>,
     machine_id: Option<String>,
     access_token: Option<String>,
+    profile_arn: Option<String>,
 ) -> Result<AddAccountResult, String> {
     let idp = provider.as_deref().unwrap_or("Google").to_string(); // ✅ 避免不必要的 clone
     let account_machine_id = machine_id
         .filter(|id| !id.trim().is_empty())
         .unwrap_or_else(generate_account_machine_id);
 
+    // 导入的 JSON / Kiro IDE 缓存通常自带 profileArn，优先使用。
+    // social 账号的 getUsageLimits 不带 profileArn 会被 Kiro 判 400 "Invalid profileArn"，
+    // 该 400 又被 is_auth_error_message 的 contains("invalid") 误判成认证错误，
+    // 最终 usage_data 落成 Null：取不到 email（账号存成 builderid_<token前8位>）
+    // 也取不到 subscriptionInfo（Pro 档位在界面显示成 Free）。
+    let provided_profile_arn = profile_arn
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    // 刷新返回的 ARN 更权威；为空时回退到调用方传入的
+    let pick_arn = |refreshed: &str| -> String {
+        let refreshed = refreshed.trim();
+        if refreshed.is_empty() {
+            provided_profile_arn.clone().unwrap_or_default()
+        } else {
+            refreshed.to_string()
+        }
+    };
+
     // 先尝试用传入的 access_token 获取配额
     let (final_access_token, final_refresh_token, final_profile_arn, usage_result) =
         if let Some(at) = access_token {
-            match get_usage_by_provider_with_machine_id(&idp, &at, &account_machine_id).await {
+            match get_usage_by_provider_with_machine_id_and_arn(
+                &idp,
+                &at,
+                &account_machine_id,
+                provided_profile_arn.as_deref(),
+            )
+            .await
+            {
                 Ok(result) if result.is_auth_error => {
                     // 401 了，刷新 token
                     let refresh_result = refresh_token_desktop(&refresh_token).await?;
-                    let new_usage = get_usage_by_provider_with_machine_id(
+                    let stored_arn = pick_arn(&refresh_result.profile_arn);
+                    let usage_arn = if stored_arn.is_empty() {
+                        None
+                    } else {
+                        Some(stored_arn.clone())
+                    };
+                    let new_usage = get_usage_by_provider_with_machine_id_and_arn(
                         &idp,
                         &refresh_result.access_token,
                         &account_machine_id,
+                        usage_arn.as_deref(),
                     )
                     .await?;
                     (
                         refresh_result.access_token,
                         refresh_result.refresh_token,
-                        refresh_result.profile_arn,
+                        stored_arn,
                         new_usage,
                     )
                 }
                 Ok(result) => {
                     // access_token 有效，但没有 profile_arn，需要刷新一次获取
                     let refresh_result = refresh_token_desktop(&refresh_token).await?;
-                    (
-                        at,
-                        refresh_token.clone(),
-                        refresh_result.profile_arn,
-                        result,
-                    )
+                    let stored_arn = pick_arn(&refresh_result.profile_arn);
+                    (at, refresh_token.clone(), stored_arn, result)
                 }
                 Err(e) => return Err(e),
             }
         } else {
             // 没有 access_token，直接刷新
             let refresh_result = refresh_token_desktop(&refresh_token).await?;
-            let usage_result = get_usage_by_provider_with_machine_id(
+            let stored_arn = pick_arn(&refresh_result.profile_arn);
+            let usage_arn = if stored_arn.is_empty() {
+                None
+            } else {
+                Some(stored_arn.clone())
+            };
+            let usage_result = get_usage_by_provider_with_machine_id_and_arn(
                 &idp,
                 &refresh_result.access_token,
                 &account_machine_id,
+                usage_arn.as_deref(),
             )
             .await?;
             (
                 refresh_result.access_token,
                 refresh_result.refresh_token,
-                refresh_result.profile_arn,
+                stored_arn,
                 usage_result,
             )
         };
@@ -624,6 +662,11 @@ pub async fn add_account_by_social(
     }
 
     let (new_email, user_id) = extract_user_info(&usage_result.usage_data);
+
+    // 保留真实 email：usage 成功时用它修正已有账号里的占位名。
+    // 历史 bug 会把 email 落成 `builderid_<refreshToken 前 8 位>`，而界面显示名
+    // 优先取 email（getSafeAccountDisplayName），所以必须回写才能真正修正展示。
+    let real_email = new_email.clone();
 
     // BuilderId 账号允许使用 userId 或 email，如果都没有则用 refreshToken 作为标识
     let final_email = new_email
@@ -659,6 +702,10 @@ pub async fn add_account_by_social(
         existing.refresh_token = Some(final_refresh_token.clone()); // ✅ 后面还要用，必须 clone
         existing.profile_arn = Some(final_profile_arn.clone()); // ✅ 保存 profile_arn
         existing.user_id = user_id;
+        // 用真实 email 覆盖占位/陈旧的名字；取不到真实 email 时保留原值
+        if let Some(email) = real_email.as_ref() {
+            existing.email = Some(email.clone());
+        }
         existing.usage_data = Some(usage_result.usage_data);
         if existing
             .machine_id
@@ -1032,6 +1079,7 @@ pub async fn add_local_kiro_account(
             Some(provider),
             None,                             // 本地导入不指定 machine_id，自动生成
             local_token.access_token.clone(), // 传入 access_token
+            local_token.profile_arn.clone(),  // social 账号取配额必须带 profileArn
         )
         .await
     }

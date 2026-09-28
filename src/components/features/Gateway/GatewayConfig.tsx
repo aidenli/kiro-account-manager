@@ -445,6 +445,25 @@ function GatewayConfig({
                     onChange={(e: React.ChangeEvent<HTMLInputElement>) => setField('threshold', Number(e.target.value) || 90)}
                   />
                 </div>
+                <div className="flex items-center justify-between p-2.5 rounded-lg border border-border bg-muted/30">
+                  <Label className="text-sm">{t('gateway.webSearchEmulation')}</Label>
+                  <Switch
+                    checked={!!config.webSearchEmulation}
+                    onCheckedChange={(checked: boolean) => setField('webSearchEmulation', checked)}
+                  />
+                </div>
+                <div className="flex flex-col gap-0.5 p-2.5 rounded-lg border border-border bg-muted/30">
+                  <Label className="text-xs text-muted-foreground">{t('gateway.webSearchTimeout')}</Label>
+                  <Input
+                    type="number"
+                    value={config.webSearchTimeoutSecs}
+                    min={5}
+                    max={120}
+                    className="h-6 text-sm px-1.5"
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setField('webSearchTimeoutSecs', Number(e.target.value) || 30)}
+                    disabled={!config.webSearchEmulation}
+                  />
+                </div>
               </div>
 
               {!config.localOnly && (

@@ -212,6 +212,7 @@ pub fn get_available_models() -> Vec<ModelInfo> {
         ("auto", "anthropic"),
         // Claude 系列（仅 thinking 版本）
         ("claude-sonnet-5-thinking", "anthropic"),
+        ("claude-opus-5.5-thinking", "anthropic"),
         ("claude-opus-4.8-thinking", "anthropic"),
         ("claude-opus-4.7-thinking", "anthropic"),
         ("claude-opus-4.6-thinking", "anthropic"),

@@ -379,7 +379,9 @@ function ImportAccountModal({ onClose, onSuccess, onNavigate }: ImportAccountMod
             refreshToken: item.refreshToken,
             provider: provider,
             machineId: item.machineId || null,
-            accessToken: item.accessToken || null
+            accessToken: item.accessToken || null,
+            // social 账号必须带 profileArn 才能取到配额/档位，JSON 里通常自带
+            profileArn: (item.profileArn ?? item.profile_arn) || null
           })
         } else {
           // IdC 账号：统一调用 add_account_by_idc

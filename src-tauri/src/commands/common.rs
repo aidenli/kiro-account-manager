@@ -559,9 +559,23 @@ async fn get_usage_by_account_inner(
         KiroClient::new()?
     };
 
-    // getUsageLimits 不带 profileArn；企业号优先账号 region，再回退常见 region
+    // social/BuilderId 账号的 getUsageLimits 必须带 profileArn，否则 Kiro 返回
+    // 400 `{"message":"Invalid profileArn."}`；企业账号 resolve 后 profile_arn 恒为
+    // None，因此天然不受影响。
+    let usage_profile_arn = if is_enterprise {
+        None
+    } else {
+        ctx.profile_arn.as_deref()
+    };
+
+    // 企业号优先账号 region，再回退常见 region
     let (used_region, usage_data) = match client
-        .get_usage_limits_with_region_fallback(access_token, &ctx.machine_id, &regions)
+        .get_usage_limits_with_region_fallback(
+            access_token,
+            &ctx.machine_id,
+            &regions,
+            usage_profile_arn,
+        )
         .await
     {
         Ok(v) => v,
@@ -609,10 +623,32 @@ pub async fn get_usage_by_provider_with_machine_id(
     access_token: &str,
     machine_id: &str,
 ) -> Result<UsageResult, String> {
+    get_usage_by_provider_with_machine_id_and_arn(provider, access_token, machine_id, None).await
+}
+
+/// 同 [`get_usage_by_provider_with_machine_id`]，但显式携带 `profileArn`。
+///
+/// social(Github) 账号的 `getUsageLimits` **必须**带 `profileArn`，否则 Kiro 返回
+/// 400 `Invalid profileArn`；该 400 又会被 `is_auth_error_message` 里的
+/// `contains("invalid")` 误判为认证错误，最终 `usage_data` 落成 `Null`，于是取不到
+/// email 与 subscriptionInfo —— 账号被存成 `builderid_<refreshToken 前 8 位>`，
+/// 界面档位也从 Pro 掉成 Free。
+///
+/// BuilderId 在缺少 profile_arn 时有共享 ARN 兜底（见 `resolve_profile_arn_with_fallback`），
+/// **social 没有**，所以这条路径必须显式传入。
+pub async fn get_usage_by_provider_with_machine_id_and_arn(
+    provider: &str,
+    access_token: &str,
+    machine_id: &str,
+    profile_arn: Option<&str>,
+) -> Result<UsageResult, String> {
     // 为了兼容旧调用，创建一个临时账号对象
     let mut temp_account = crate::core::account::Account::new(String::new(), String::new());
     temp_account.provider = Some(provider.to_string());
     temp_account.machine_id = Some(machine_id.to_string());
+    if let Some(arn) = profile_arn.map(str::trim).filter(|s| !s.is_empty()) {
+        temp_account.profile_arn = Some(arn.to_string());
+    }
 
     // 根据 provider 设置 auth_method（profile_arn 由 get_usage_by_account 统一处理）
     if provider == "BuilderId" || provider == "Enterprise" {

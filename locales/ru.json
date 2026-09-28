@@ -1542,6 +1542,8 @@
   "gateway.securityAndAdvanced": "Безопасность и дополнительно",
   "gateway.cacheTTLSeconds": "TTL кэша (секунды)",
   "gateway.thresholdPercent": "Порог %",
+  "gateway.webSearchEmulation": "Эмуляция серверного web_search",
+  "gateway.webSearchTimeout": "Таймаут поиска (секунды)",
   "gateway.ipWhitelist": "Белый список IP",
   "gateway.manageKeys": "Управление ключами",
   "gateway.keys": "ключей",

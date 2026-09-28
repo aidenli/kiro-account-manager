@@ -125,6 +125,18 @@ pub struct GatewayConfig {
     /// 响应缓存：TTL（秒）
     #[serde(default = "default_cache_ttl")]
     pub response_cache_ttl: u64,
+    /// 服务端 web_search 模拟：由网关自行调用 Kiro MCP 执行搜索，
+    /// 并按 Anthropic 服务端工具格式回吐（server_tool_use + web_search_tool_result）。
+    /// 仅影响「纯服务端搜索请求」，默认关闭。
+    #[serde(default)]
+    pub web_search_emulation: bool,
+    /// web_search 模拟：Kiro MCP 请求超时（秒）
+    #[serde(default = "default_web_search_timeout")]
+    pub web_search_timeout_secs: u64,
+}
+
+fn default_web_search_timeout() -> u64 {
+    30
 }
 
 fn default_cache_ttl() -> u64 {
@@ -464,6 +476,8 @@ impl Default for GatewayConfig {
             log_requests: true,
             response_cache_enabled: true,
             response_cache_ttl: default_cache_ttl(),
+            web_search_emulation: false,
+            web_search_timeout_secs: default_web_search_timeout(),
         }
     }
 }

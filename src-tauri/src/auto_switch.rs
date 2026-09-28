@@ -363,8 +363,10 @@ async fn resolve_current_account_by_usage(
         }
     };
     let regions = crate::clients::kiro_client::usage_limits_region_candidates(region, false);
+    // 该反查路径用的是本机 IDE token，拿不到某个具体账号的 profileArn，
+    // 保持原行为（传 None）；social 账号在此仍会 400，属既有问题，另行处理。
     let usage = match client
-        .get_usage_limits_with_region_fallback(access_token, &machine_id, &regions)
+        .get_usage_limits_with_region_fallback(access_token, &machine_id, &regions, None)
         .await
     {
         Ok((_region, data)) => data,
